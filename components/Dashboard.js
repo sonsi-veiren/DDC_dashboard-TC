@@ -23,6 +23,7 @@ const monthLabel = (ym) => {
 
 export default function Dashboard() {
   const [raw, setRaw] = useState(null);
+  const [sensibilidad, setSensibilidad] = useState(null);
   const [loadError, setLoadError] = useState(null);
 
   const [desde, setDesde] = useState(null);
@@ -30,17 +31,52 @@ export default function Dashboard() {
   const [tcBaseInput, setTcBaseInput] = useState("42.00");
   const tcBase = parseFloat(tcBaseInput) || 0;
 
-  useEffect(() => {
+  const [uploading, setUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState(null);
+
+  const cargarOperaciones = () =>
     fetch("/api/operaciones")
       .then((res) => res.json())
       .then((data) => {
         if (data.error) throw new Error(data.error);
         setRaw(data.operaciones);
+        setSensibilidad(data.sensibilidad ?? null);
+        return data;
+      });
+
+  useEffect(() => {
+    cargarOperaciones()
+      .then((data) => {
         setDesde(data.operaciones[0]?.fecha ?? null);
         setHasta(data.operaciones[data.operaciones.length - 1]?.fecha ?? null);
       })
       .catch((err) => setLoadError(err.message || "Error cargando operaciones"));
   }, []);
+
+  async function handleUploadFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+
+    setUploading(true);
+    setUploadStatus(null);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("/api/upload", { method: "POST", body: formData });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "Error subiendo el archivo");
+
+      const nueva = await cargarOperaciones();
+      setDesde(nueva.operaciones[0]?.fecha ?? null);
+      setHasta(nueva.operaciones[nueva.operaciones.length - 1]?.fecha ?? null);
+      setUploadStatus({ ok: true, text: "Datos actualizados ✓" });
+    } catch (err) {
+      setUploadStatus({ ok: false, text: err.message || "Error subiendo el archivo" });
+    } finally {
+      setUploading(false);
+    }
+  }
 
   const filtered = useMemo(() => {
     if (!raw || !desde || !hasta) return [];
@@ -105,6 +141,19 @@ export default function Dashboard() {
     [gananciaPorOp]
   );
 
+  const pendientePesosTotal = sensibilidad?.pendientePesosTotal ?? null;
+  const usdNecesariosAlProyecto =
+    pendientePesosTotal != null && tcBase > 0 ? pendientePesosTotal / tcBase : null;
+
+  const sensibilidadTabla = useMemo(() => {
+    if (pendientePesosTotal == null || tcBase <= 0) return [];
+    return (sensibilidad?.tcCandidatos ?? []).map((tc) => {
+      const usdNecesario = pendientePesosTotal / tc;
+      const diferencia = pendientePesosTotal / tcBase - usdNecesario;
+      return { tc, usdNecesario, diferencia, esProyecto: Math.abs(tc - tcBase) <= 0.01 };
+    });
+  }, [sensibilidad, pendientePesosTotal, tcBase]);
+
   if (loadError) {
     return (
       <div style={{ padding: 40, fontFamily: "Inter, sans-serif", color: "#dc2626" }}>
@@ -128,6 +177,7 @@ export default function Dashboard() {
           <HeaderControls
             desde={desde} hasta={hasta} setDesde={setDesde} setHasta={setHasta}
             raw={raw} tcBaseInput={tcBaseInput} setTcBaseInput={setTcBaseInput}
+            uploading={uploading} uploadStatus={uploadStatus} handleUploadFile={handleUploadFile}
             n={0}
           />
           <div style={{ padding: 40, color: "#64748b" }}>
@@ -188,12 +238,27 @@ export default function Dashboard() {
                 style={{ ...fieldInput, color: "#1d4ed8", fontWeight: 700, width: 70 }}
               />
             </div>
+            <label style={{ ...fieldWrap, cursor: uploading ? "default" : "pointer" }}>
+              <span style={fieldLabel}>{uploading ? "Subiendo…" : "Subir Excel actualizado"}</span>
+              <input
+                type="file"
+                accept=".xlsx"
+                onChange={handleUploadFile}
+                disabled={uploading}
+                style={{ display: "none" }}
+              />
+              {uploadStatus && (
+                <span style={{ fontSize: 10.5, fontWeight: 600, color: uploadStatus.ok ? "#16a34a" : "#dc2626" }}>
+                  {uploadStatus.text}
+                </span>
+              )}
+            </label>
           </div>
         </div>
 
         {/* KPI cards */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 14, marginBottom: 24 }}>
-          <Kpi label="USD OPERADO" icon="$" value={fmtUSD(stats.totalUSD)} sub={fmtPESOS(stats.totalPESOS)} valueColor="#0f172a" />
+          <Kpi label="USD CAMBIADOS" icon="$" value={fmtUSD(stats.totalUSD)} sub={fmtPESOS(stats.totalPESOS)} valueColor="#0f172a" />
           <Kpi
             label="TC PROMEDIO"
             icon="⇄"
@@ -287,10 +352,60 @@ export default function Dashboard() {
           </ChartCard>
         </div>
 
+        {/* Análisis de Sensibilidad a Futuro */}
+        {pendientePesosTotal != null && (
+          <>
+            <SectionTitle>Análisis de Sensibilidad a Futuro</SectionTitle>
+            <div style={{ marginBottom: 12 }}>
+              <ChartCard
+                title="Pendiente de obra: USD necesarios según el TC"
+                subtitle="Pesos pendientes de cambiar, proyectados a distintos escenarios de TC"
+              >
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 32, marginBottom: 16 }}>
+                  <div>
+                    <div style={miniLabel}>PENDIENTE PESOS TOTAL</div>
+                    <div style={miniValue}>{fmtPESOS(pendientePesosTotal)}</div>
+                  </div>
+                  <div>
+                    <div style={miniLabel}>USD NECESARIOS AL TC PROYECTO (${tcBase.toFixed(2)})</div>
+                    <div style={{ ...miniValue, color: "#1d4ed8" }}>{fmtUSD2(usdNecesariosAlProyecto)}</div>
+                  </div>
+                </div>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                    <thead>
+                      <tr>
+                        <th style={thStyle}>TC candidato</th>
+                        <th style={thStyle}>USD necesarios</th>
+                        <th style={thStyle}>Diferencia vs. TC proyecto</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sensibilidadTabla.map((row) => (
+                        <tr key={row.tc} style={{ background: row.esProyecto ? "#fef9c3" : "transparent" }}>
+                          <td style={tdStyle}>${row.tc.toFixed(2)}</td>
+                          <td style={tdStyle}>{fmtUSD2(row.usdNecesario)}</td>
+                          <td style={{ ...tdStyle, color: row.diferencia >= 0 ? "#16a34a" : "#dc2626", fontWeight: 700 }}>
+                            {row.diferencia >= 0 ? "+" : ""}
+                            {fmtUSD2(row.diferencia)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </ChartCard>
+            </div>
+          </>
+        )}
+
         <div style={{ fontSize: 11.5, color: "#94a3b8", marginTop: 8, lineHeight: 1.6 }}>
           Metodología: el efecto por operación compara los USD que hubiesen resultado de convertir los pesos de esa
           operación al TC proyecto, contra los USD reales de la operación (Pesos/TC proyecto − USD real). Un valor
           positivo indica que el TC real fue más favorable que el proyectado (peso más débil que lo presupuestado).
+          El análisis de sensibilidad compara, para los pesos pendientes de cambiar, los USD necesarios a cada TC
+          candidato contra los USD necesarios al TC proyecto (Pendiente/TC proyecto − Pendiente/TC candidato). Un
+          valor positivo indica que ese escenario de TC requeriría menos USD que el TC proyecto actual.
         </div>
       </div>
     </div>
@@ -299,7 +414,7 @@ export default function Dashboard() {
 
 // --- helper components ---
 
-function HeaderControls({ desde, hasta, setDesde, setHasta, raw, tcBaseInput, setTcBaseInput }) {
+function HeaderControls({ desde, hasta, setDesde, setHasta, raw, tcBaseInput, setTcBaseInput, uploading, uploadStatus, handleUploadFile }) {
   return (
     <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 20 }}>
       <div>
@@ -329,6 +444,21 @@ function HeaderControls({ desde, hasta, setDesde, setHasta, raw, tcBaseInput, se
             style={{ ...fieldInput, color: "#1d4ed8", fontWeight: 700, width: 70 }}
           />
         </div>
+        <label style={{ ...fieldWrap, cursor: uploading ? "default" : "pointer" }}>
+          <span style={fieldLabel}>{uploading ? "Subiendo…" : "Subir Excel actualizado"}</span>
+          <input
+            type="file"
+            accept=".xlsx"
+            onChange={handleUploadFile}
+            disabled={uploading}
+            style={{ display: "none" }}
+          />
+          {uploadStatus && (
+            <span style={{ fontSize: 10.5, fontWeight: 600, color: uploadStatus.ok ? "#16a34a" : "#dc2626" }}>
+              {uploadStatus.text}
+            </span>
+          )}
+        </label>
       </div>
     </div>
   );
@@ -371,3 +501,7 @@ const fieldWrap = {
 };
 const fieldLabel = { fontSize: 10, fontWeight: 700, color: "#64748b" };
 const fieldInput = { border: "none", outline: "none", fontSize: 13, fontWeight: 600, color: "#0f172a", background: "transparent", width: 110 };
+const miniLabel = { fontSize: 11, fontWeight: 700, color: "#94a3b8", letterSpacing: 0.5, marginBottom: 4 };
+const miniValue = { fontSize: 19, fontWeight: 800, color: "#0f172a" };
+const thStyle = { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#94a3b8", padding: "6px 10px", borderBottom: "1px solid #e2e8f0" };
+const tdStyle = { padding: "7px 10px", borderBottom: "1px solid #f1f5f9", color: "#0f172a" };
